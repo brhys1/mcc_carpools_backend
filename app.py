@@ -189,7 +189,7 @@ def get_drivers():
         drivers = DriverModel.get_all()
         return jsonify(drivers)
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        return jsonify({'error': str(e)}), 500 
 
 
 @app.route('/api/drivers', methods=['POST'])
