@@ -9,6 +9,7 @@ import os
 import base64
 from google.cloud import firestore
 from datetime import datetime
+from functools import wraps
 
 load_dotenv()
 
@@ -540,7 +541,19 @@ def get_google_sheets_data():
 
 
 # API Routes
+API_KEY = os.getenv("API_KEY")
+
+def require_api_key(f):
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        key = request.headers.get('x-api-key')
+        if not API_KEY or key != API_KEY:
+            return jsonify({'error': 'Unauthorized: Invalid or missing API key'}), 401
+        return f(*args, **kwargs)
+    return decorated
+
 @app.route('/api/sheets', methods=['GET'])
+@require_api_key
 def fetch_sheets_data():
     """Fetch data from Google Sheets"""
     try:
@@ -551,6 +564,7 @@ def fetch_sheets_data():
     
     
 @app.route('/api/drivers', methods=['GET'])
+@require_api_key
 def get_drivers():
     """Get all drivers"""
     try:
@@ -561,6 +575,7 @@ def get_drivers():
 
     
 @app.route('/api/drivers', methods=['POST'])
+@require_api_key
 def add_driver():
     """Add a new driver"""
     try:
@@ -620,6 +635,7 @@ def add_driver():
 
 
 @app.route('/api/riders', methods=['GET'])
+@require_api_key
 def get_riders():
     """Get all riders"""
     try:
@@ -698,6 +714,7 @@ def add_drive(data):
         return False
     
 @app.route('/api/riders', methods=['POST'])
+@require_api_key
 def add_rider():
     """Add or update a rider"""
     try:
@@ -747,6 +764,7 @@ def add_rider():
 
 
 @app.route('/api/drives', methods=['GET'])
+@require_api_key
 def get_drives():
     """Get all drives"""
     try:
@@ -757,6 +775,7 @@ def get_drives():
 
 
 @app.route('/api/rides/<rider_id>', methods=['GET'])
+@require_api_key
 def get_rider_rides(rider_id):
     """Get all rides for a specific rider"""
     try:
@@ -784,6 +803,7 @@ def get_rider_rides(rider_id):
 
 
 @app.route('/api/drives/<drive_id>/capacity', methods=['PUT'])
+@require_api_key
 def update_drive_capacity(drive_id):
     """Update remaining capacity of a drive"""
     try:
@@ -815,6 +835,7 @@ def update_drive_capacity(drive_id):
 
 
 @app.route('/api/priority-queue/<date>', methods=['GET'])
+@require_api_key
 def get_priority_queue(date):
     """Get the priority queue for a specific date (for debugging/transparency)"""
     try:
@@ -860,6 +881,7 @@ def get_priority_queue(date):
 
 
 @app.route('/api/debug/riders', methods=['GET'])
+@require_api_key
 def debug_riders():
     """Debug endpoint to see all riders and their availability"""
     try:
@@ -886,6 +908,7 @@ def debug_riders():
 
 
 @app.route('/api/current-week-drives', methods=['GET'])
+@require_api_key
 def get_current_week_drives():
     """Get all drives for today and the next 7 days"""
     try:
@@ -978,6 +1001,7 @@ def get_current_week_drives():
 
 
 @app.route('/api/drives/by-phone', methods=['DELETE'])
+@require_api_key
 def delete_drive_by_phone():
     """Delete a drive if the phone number matches the driver's phone (now stored on the drive)"""
     try:
@@ -1006,6 +1030,7 @@ def delete_drive_by_phone():
 
 
 @app.route('/api/drives/<drive_id>/signup', methods=['POST'])
+@require_api_key
 def signup_for_drive(drive_id):
     """Sign up a user for a specific drive slot"""
     try:
