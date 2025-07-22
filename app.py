@@ -878,6 +878,7 @@ def get_priority_queue(date):
         
     except Exception as e:
         return jsonify({'error': str(e)}), 500
+    
 
 
 @app.route('/api/debug/riders', methods=['GET'])
