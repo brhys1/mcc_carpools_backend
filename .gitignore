@@ -1,0 +1,19 @@
+# testing
+/coverage
+
+# production
+/build
+
+# misc
+.DS_Store
+*.pem
+
+# firebase
+firebase_admin.json
+mcc-carpools-446701-6fedbf12675b.json
+
+# env files (can opt-in for committing if needed)
+.env*
+
+# vercel
+.vercel

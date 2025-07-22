@@ -13,4 +13,5 @@ psycopg2-binary
 python-dotenv
 gspread
 oauth2client
+oauthlib
 google-cloud-firestore
