@@ -8,8 +8,12 @@ from dotenv import load_dotenv
 import os
 import base64
 from google.cloud import firestore
-from datetime import datetime
+from datetime import datetime, timedelta
 from functools import wraps
+import smtplib
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
+from apscheduler.schedulers.background import BackgroundScheduler
 
 load_dotenv()
 
@@ -446,7 +450,6 @@ def get_rider_pairing_history(rider_id, week_key):
             drive_date = drive.get('date', '')
             if drive_date:
                 try:
-                    from datetime import datetime
                     date_parts = drive_date.split(', ')
                     if len(date_parts) >= 2:
                         date_str = date_parts[1]
@@ -511,9 +514,7 @@ def update_rider_availability(rider_id, date, start_time, end_time, drive_id):
 
 def get_week_key_from_date(date_string):
     """Extract week key from date string (e.g., 'Monday, 12/16/24' -> '2024-50')"""
-    try:
-        from datetime import datetime
-        
+    try:        
         # Parse the date string (assuming format like "Monday, 12/16/24")
         date_parts = date_string.split(', ')
         if len(date_parts) >= 2:
@@ -527,8 +528,6 @@ def get_week_key_from_date(date_string):
             return f"{datetime.now().year}-{datetime.now().isocalendar()[1]}"
     except Exception as e:
         print(f"Error extracting week key from date '{date_string}': {e}")
-        # Fallback: use current week
-        from datetime import datetime
         return f"{datetime.now().year}-{datetime.now().isocalendar()[1]}"
 
 
@@ -539,6 +538,58 @@ def get_google_sheets_data():
     sheet = client.open_by_key(os.getenv("SPREADSHEET_ID")).sheet1
     return sheet.get_all_records()
 
+
+def send_match_email(to_email, subject, body):
+    smtp_server = "smtp.gmail.com"
+    smtp_port = 587
+    sender_email = os.getenv("MATCH_EMAIL_ADDRESS")
+    sender_password = os.getenv("MATCH_EMAIL_PASSWORD")
+
+    msg = MIMEMultipart()
+    msg["From"] = sender_email
+    msg["To"] = to_email
+    msg["Subject"] = subject
+
+    msg.attach(MIMEText(body, "plain"))
+
+    with smtplib.SMTP(smtp_server, smtp_port) as server:
+        server.starttls()
+        server.login(sender_email, sender_password)
+        server.sendmail(sender_email, to_email, msg.as_string())
+
+
+def send_driver_email(driver_email, driver_name, drive_info, riders):
+    subject = f"Your carpool for {drive_info['date']}"
+    rider_lines = [f"- {r['name']} ({r['email']})" for r in riders]
+    rider_list = '\n'.join(rider_lines) if rider_lines else 'No riders currently signed up.'
+    body = f"Hi {driver_name},\n\nHere is your carpool for {drive_info['date']}:\n\nPickup Address: {drive_info['pickup_address']}\nTime: {drive_info['start_time']} - {drive_info['end_time']}\n\nRiders:\n{rider_list}\n\nIf this list changes, you will receive an updated email.\n\nSafe travels!"
+    try:
+        send_match_email(driver_email, subject, body)
+    except Exception as e:
+        print(f"Error sending driver email to {driver_email}: {e}")
+
+# APScheduler job: send driver emails at 8am each day
+scheduler = BackgroundScheduler()
+
+def send_daily_driver_emails():
+    today = datetime.now().strftime('%A, %m/%d/%y')
+    all_drives = DriveModel.get_all()
+    for drive in all_drives:
+        if drive.get('date') == today:
+            driver_email = drive.get('driver_email')
+            driver_name = drive.get('driver_name', 'Driver')
+            pickup_address = drive.get('pickup_address', 'Unknown')
+            start_time = drive.get('start_time', 'Unknown')
+            end_time = drive.get('end_time', 'Unknown')
+            paired_riders = []
+            for rider_id in drive.get('paired_riders', []):
+                rider = RiderModel.get_by_id(rider_id)
+                if rider:
+                    paired_riders.append({'name': rider.get('name', 'Unknown'), 'email': rider.get('email', 'Unknown')})
+            send_driver_email(driver_email, driver_name, drive, paired_riders)
+
+scheduler.add_job(send_daily_driver_emails, 'cron', hour=8, minute=0)
+scheduler.start()
 
 # API Routes
 API_KEY = os.getenv("API_KEY")
@@ -706,6 +757,23 @@ def add_drive(data):
                         # Update rider availability to mark them as paired
                         for rider_id in paired_riders:
                             update_rider_availability(rider_id, date, start_time, end_time, drive_id)
+                            # Send match email to rider
+                            rider = RiderModel.get_by_id(rider_id)
+                            if rider and rider.get('email'):
+                                subject = "You've been matched for a carpool!"
+                                body = f"Hi {rider.get('name', 'Rider')},\n\nYou've been matched with driver {name} for your ride on {date}.\nPickup: {address}\nDeparture Time: {start_time}\nGym Departure Time: {end_time}\nPlease arrive a few minutes before the departure time.\n\nContact your driver at: {email} or {phone}\n"
+                                try:
+                                    send_match_email(rider['email'], subject, body)
+                                except Exception as e:
+                                    print(f"Error sending match email to {rider['email']}: {e}")
+                        today_str = datetime.now().strftime('%A, %m/%d/%y')
+                        if date == today_str:
+                            paired_riders_details = []
+                            for rider_id in paired_riders:
+                                rider = RiderModel.get_by_id(rider_id)
+                                if rider:
+                                    paired_riders_details.append({'name': rider.get('name', 'Unknown'), 'email': rider.get('email', 'Unknown')})
+                            send_driver_email(email, name, drive_info, paired_riders_details)
         
         return True
         
@@ -911,18 +979,19 @@ def debug_riders():
 @app.route('/api/current-week-drives', methods=['GET'])
 @require_api_key
 def get_current_week_drives():
-    """Get all drives for today and the next 7 days"""
+    """Get all drives for today through next Sunday"""
     try:
-        from datetime import datetime, timedelta
         
-        # Get today and next 7 days
         today = datetime.now()
+        # Calculate days until next Sunday (0=Monday, 6=Sunday)
+        days_until_sunday = (6 - today.weekday()) % 7
+        period_end_date = today + timedelta(days=days_until_sunday) + timedelta(days=7)
         
-        # Generate dates for today and next 7 days
+        # Generate dates from today through next Sunday
         week_dates = []
-        for i in range(7):  # Today + 7 more days = 8 total
+        num_days = (period_end_date - today).days + 1
+        for i in range(num_days):
             date = today + timedelta(days=i)
-            # Format as "Monday, MM/DD/YY"
             day_name = date.strftime('%A')
             date_str = date.strftime('%m/%d/%y')
             week_dates.append(f"{day_name}, {date_str}")
@@ -991,7 +1060,7 @@ def get_current_week_drives():
         
         return jsonify({
             'period_start': today.strftime('%Y-%m-%d'),
-            'period_end': (today + timedelta(days=7)).strftime('%Y-%m-%d'),
+            'period_end': period_end_date.strftime('%Y-%m-%d'),
             'drives_by_day': drives_by_day,
             'total_drives': len(current_week_drives)
         })
@@ -1120,7 +1189,23 @@ def signup_for_drive(drive_id):
                 'remaining_capacity': remaining_capacity,
                 'status': status
             })
-
+            today_str = datetime.now().strftime('%A, %m/%d/%y')
+            if drive_date == today_str:
+                paired_riders_details = []
+                for rid in paired_riders:
+                    rider = RiderModel.get_by_id(rid)
+                    if rider:
+                        paired_riders_details.append({'name': rider.get('name', 'Unknown'), 'email': rider.get('email', 'Unknown')})
+                send_driver_email(drive['driver_email'], drive['driver_name'], drive, paired_riders_details)
+            # Send confirmation email to the rider who just signed up
+            rider = RiderModel.get_by_id(rider_id)
+            if rider and rider.get('email'):
+                subject = "Carpool Signup Confirmation"
+                body = f"Hi {rider.get('name', 'Rider')},\n\nYou have successfully signed up for a carpool!\n\nDrive Details:\nDate: {drive_date}\nTime: {start_time} - {end_time}\nPickup Address: {drive.get('pickup_address', 'Unknown')}\n\nDriver: {drive.get('driver_name', 'Unknown')}\nDriver Email: {drive.get('driver_email', 'Unknown')}\n\nSee you there!"
+                try:
+                    send_match_email(rider['email'], subject, body)
+                except Exception as e:
+                    print(f"Error sending signup confirmation email to {rider['email']}: {e}")
         return jsonify({'message': 'Signed up for drive successfully', 'rider_id': rider_id}), 200
     except Exception as e:
         print(f"Error in signup_for_drive: {e}")
