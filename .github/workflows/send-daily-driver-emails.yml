@@ -1,0 +1,16 @@
+name: Send Daily Driver Emails
+
+on:
+  schedule:
+    - cron: '0 12 * * *'  # 8am Eastern Time (12:00 UTC)
+  workflow_dispatch:
+
+jobs:
+  send-daily-driver-emails:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Send POST to backend to trigger daily driver emails
+        run: |
+          curl -X POST \
+            -H "x-api-key: ${{ secrets.BACKEND_API_KEY }}" \
+            ${{ secrets.BACKEND_URL }}/api/daily-driver-emails 

@@ -13,7 +13,8 @@ from functools import wraps
 import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
-from apscheduler.schedulers.background import BackgroundScheduler
+# Remove APScheduler import and scheduler code
+# from apscheduler.schedulers.background import BackgroundScheduler
 
 load_dotenv()
 
@@ -568,9 +569,20 @@ def send_driver_email(driver_email, driver_name, drive_info, riders):
     except Exception as e:
         print(f"Error sending driver email to {driver_email}: {e}")
 
-# APScheduler job: send driver emails at 8am each day
-scheduler = BackgroundScheduler()
 
+API_KEY = os.getenv("API_KEY")
+
+def require_api_key(f):
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        key = request.headers.get('x-api-key')
+        if not API_KEY or key != API_KEY:
+            return jsonify({'error': 'Unauthorized: Invalid or missing API key'}), 401
+        return f(*args, **kwargs)
+    return decorated
+
+@app.route('/api/daily-driver-emails', methods=['POST'])
+@require_api_key
 def send_daily_driver_emails():
     today = datetime.now().strftime('%A, %m/%d/%y')
     all_drives = DriveModel.get_all()
@@ -587,21 +599,6 @@ def send_daily_driver_emails():
                 if rider:
                     paired_riders.append({'name': rider.get('name', 'Unknown'), 'email': rider.get('email', 'Unknown')})
             send_driver_email(driver_email, driver_name, drive, paired_riders)
-
-scheduler.add_job(send_daily_driver_emails, 'cron', hour=8, minute=0)
-scheduler.start()
-
-# API Routes
-API_KEY = os.getenv("API_KEY")
-
-def require_api_key(f):
-    @wraps(f)
-    def decorated(*args, **kwargs):
-        key = request.headers.get('x-api-key')
-        if not API_KEY or key != API_KEY:
-            return jsonify({'error': 'Unauthorized: Invalid or missing API key'}), 401
-        return f(*args, **kwargs)
-    return decorated
 
 @app.route('/api/sheets', methods=['GET'])
 @require_api_key
