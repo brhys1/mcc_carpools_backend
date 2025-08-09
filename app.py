@@ -539,6 +539,83 @@ def get_google_sheets_data():
     sheet = client.open_by_key(os.getenv("SPREADSHEET_ID")).sheet1
     return sheet.get_all_records()
 
+def get_current_week_state():
+    """Get the current week state and whether submissions are open"""
+    today = datetime.now()
+    current_week_start = today - timedelta(days=today.weekday())  # Monday
+    current_week_end = current_week_start + timedelta(days=6)  # Sunday
+    
+    # Check if we have a stored state for this week
+    week_key = f"{current_week_start.strftime('%Y-%m-%d')}"
+    
+    # For now, we'll use a simple logic:
+    # - If it's before Saturday 12am, submissions are open for current week
+    # - If it's Saturday 12am or later, submissions are closed and matching should be done
+    #   Then we switch to collecting for next week
+    
+    is_saturday_or_later = today.weekday() >= 5  # Saturday = 5, Sunday = 6
+    is_after_midnight = today.hour >= 0
+    
+    submissions_open = not (is_saturday_or_later and is_after_midnight)
+    
+    if submissions_open:
+        # Still collecting for current week
+        return {
+            'week_start': current_week_start.strftime('%Y-%m-%d'),
+            'week_end': current_week_end.strftime('%Y-%m-%d'),
+            'week_key': week_key,
+            'submissions_open': True,
+            'matching_completed': False,
+            'current_date': today.strftime('%Y-%m-%d'),
+            'deadline': (current_week_start + timedelta(days=4)).strftime('%Y-%m-%d'),  # Friday
+            'collecting_for': 'current_week'
+        }
+    else:
+        # Matching completed, now collecting for next week
+        next_week_start = current_week_start + timedelta(days=7)
+        next_week_end = next_week_start + timedelta(days=6)
+        next_week_key = f"{next_week_start.strftime('%Y-%m-%d')}"
+        
+        return {
+            'week_start': next_week_start.strftime('%Y-%m-%d'),
+            'week_end': next_week_end.strftime('%Y-%m-%d'),
+            'week_key': next_week_key,
+            'submissions_open': True,  # Open for next week
+            'matching_completed': True,  # Current week matching is done
+            'current_date': today.strftime('%Y-%m-%d'),
+            'deadline': (next_week_start + timedelta(days=4)).strftime('%Y-%m-%d'),  # Next Friday
+            'collecting_for': 'next_week',
+            'last_week_start': current_week_start.strftime('%Y-%m-%d'),
+            'last_week_end': current_week_end.strftime('%Y-%m-%d')
+        }
+
+def get_next_week_dates():
+    """Get the dates for next week (Monday-Sunday)"""
+    today = datetime.now()
+    current_week_start = today - timedelta(days=today.weekday())  # Monday
+    
+    # If it's Saturday or later, we want the week after next
+    # If it's before Saturday, we want next week
+    is_saturday_or_later = today.weekday() >= 5  # Saturday = 5, Sunday = 6
+    is_after_midnight = today.hour >= 0
+    
+    if is_saturday_or_later and is_after_midnight:
+        # After matching, get the week after next
+        next_week_start = current_week_start + timedelta(days=14)
+    else:
+        # Before matching, get next week
+        next_week_start = current_week_start + timedelta(days=7)
+    
+    next_week_dates = []
+    
+    for i in range(7):
+        date = next_week_start + timedelta(days=i)
+        day_name = date.strftime('%A')
+        date_str = date.strftime('%m/%d/%y')
+        next_week_dates.append(f"{day_name}, {date_str}")
+    
+    return next_week_dates
+
 
 def send_match_email(to_email, subject, body):
     smtp_server = "smtp.gmail.com"
@@ -783,6 +860,11 @@ def add_drive(data):
 def add_rider():
     """Add or update a rider"""
     try:
+        # Check if submissions are open
+        state = get_current_week_state()
+        if not state['submissions_open']:
+            return jsonify({'error': 'Submissions are closed. Matching has been completed for this week.'}), 400
+        
         data = request.get_json()
         
         # Validate required fields
@@ -982,7 +1064,7 @@ def get_current_week_drives():
         today = datetime.now()
         # Calculate days until next Sunday (0=Monday, 6=Sunday)
         days_until_sunday = (6 - today.weekday()) % 7
-        period_end_date = today + timedelta(days=days_until_sunday) + timedelta(days=7)
+        period_end_date = today + timedelta(days=days_until_sunday)
         
         # Generate dates from today through next Sunday
         week_dates = []
@@ -1206,6 +1288,89 @@ def signup_for_drive(drive_id):
         return jsonify({'message': 'Signed up for drive successfully', 'rider_id': rider_id}), 200
     except Exception as e:
         print(f"Error in signup_for_drive: {e}")
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/week-state', methods=['GET'])
+@require_api_key
+def get_week_state():
+    """Get the current week state and whether submissions are open"""
+    try:
+        state = get_current_week_state()
+        return jsonify(state)
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/trigger-matching', methods=['POST'])
+@require_api_key
+def trigger_matching():
+    """Trigger the matching algorithm for the current week"""
+    try:
+        state = get_current_week_state()
+        
+        if state['submissions_open']:
+            return jsonify({'error': 'Submissions are still open. Cannot run matching yet.'}), 400
+        
+        # Get all drives for the current week
+        current_week_dates = []
+        week_start = datetime.strptime(state['week_start'], '%Y-%m-%d')
+        for i in range(7):
+            date = week_start + timedelta(days=i)
+            day_name = date.strftime('%A')
+            date_str = date.strftime('%m/%d/%y')
+            current_week_dates.append(f"{day_name}, {date_str}")
+        
+        all_drives = DriveModel.get_all()
+        all_riders = RiderModel.get_all()
+        
+        # Process each drive and pair riders
+        for drive in all_drives:
+            drive_date = drive.get('date', '')
+            if drive_date in current_week_dates:
+                # Re-run pairing for this drive
+                paired_riders = pair_riders_with_drive(
+                    all_riders,
+                    drive_date,
+                    drive.get('start_time'),
+                    drive.get('end_time'),
+                    drive.get('pickup_address'),
+                    drive.get('total_capacity', 1)
+                )
+                
+                # Update drive with new paired riders
+                if paired_riders:
+                    updated_drive = {
+                        "paired_riders": paired_riders,
+                        "remaining_capacity": drive.get('total_capacity', 1) - len(paired_riders),
+                        "status": "partially_filled" if len(paired_riders) < drive.get('total_capacity', 1) else "filled"
+                    }
+                    DriveModel.update(drive['id'], updated_drive)
+                    
+                    # Update rider availability and send emails
+                    for rider_id in paired_riders:
+                        update_rider_availability(rider_id, drive_date, drive.get('start_time'), drive.get('end_time'), drive['id'])
+                        
+                        # Send match email to rider
+                        rider = RiderModel.get_by_id(rider_id)
+                        if rider and rider.get('email'):
+                            subject = "You've been matched for a carpool!"
+                            body = f"Hi {rider.get('name', 'Rider')},\n\nYou've been matched with driver {drive.get('driver_name')} for your ride on {drive_date}.\nPickup: {drive.get('pickup_address')}\nTime: {drive.get('start_time')} - {drive.get('end_time')}\n\nContact your driver at: {drive.get('driver_email')}\n"
+                            try:
+                                send_match_email(rider['email'], subject, body)
+                            except Exception as e:
+                                print(f"Error sending match email to {rider['email']}: {e}")
+                    
+                    # Send driver email
+                    paired_riders_details = []
+                    for rider_id in paired_riders:
+                        rider = RiderModel.get_by_id(rider_id)
+                        if rider:
+                            paired_riders_details.append({'name': rider.get('name', 'Unknown'), 'email': rider.get('email', 'Unknown')})
+                    send_driver_email(drive.get('driver_email'), drive.get('driver_name'), drive, paired_riders_details)
+        
+        return jsonify({'message': 'Matching algorithm completed successfully'}), 200
+        
+    except Exception as e:
         return jsonify({'error': str(e)}), 500
 
 

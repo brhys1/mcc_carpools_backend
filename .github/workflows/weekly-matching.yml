@@ -1,0 +1,16 @@
+name: Weekly Matching Algorithm
+
+on:
+  schedule:
+    - cron: '1 4 * * 6'  # Saturday 12:01am Eastern Time (4:01 UTC)
+  workflow_dispatch:
+
+jobs:
+  run-matching:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger weekly matching algorithm
+        run: |
+          curl -X POST \
+            -H "x-api-key: ${{ secrets.BACKEND_API_KEY }}" \
+            ${{ secrets.BACKEND_URL }}/api/trigger-matching
