@@ -660,9 +660,11 @@ def require_api_key(f):
 
 @app.route('/api/daily-driver-emails', methods=['POST'])
 @require_api_key
-def send_daily_driver_emails():
+def send_daily_driver_and_rider_emails():
+    """Send reminder emails to both drivers and riders for today's carpools at 8 AM"""
     today = datetime.now().strftime('%A, %m/%d/%y')
     all_drives = DriveModel.get_all()
+    
     for drive in all_drives:
         if drive.get('date') == today:
             driver_email = drive.get('driver_email')
@@ -671,10 +673,42 @@ def send_daily_driver_emails():
             start_time = drive.get('start_time', 'Unknown')
             end_time = drive.get('end_time', 'Unknown')
             paired_riders = []
+            
             for rider_id in drive.get('paired_riders', []):
                 rider = RiderModel.get_by_id(rider_id)
                 if rider:
                     paired_riders.append({'name': rider.get('name', 'Unknown'), 'email': rider.get('email', 'Unknown')})
+                    
+                    # Send reminder email to rider
+                    try:
+                        subject = f"🚗 Carpool Reminder for Today - {today}"
+                        body = f"""Hi {rider.get('name', 'Rider')},
+
+                        This is your reminder for today's carpool!
+
+                        🚗 Drive Details:
+                        Date: {today}
+                        Time: {start_time} - {end_time}
+                        Pickup Address: {pickup_address}
+
+                        👨‍💼 Driver: {driver_name}
+                        📧 Driver Email: {driver_email}
+                        📱 Driver Phone: {drive.get('driver_phone', 'Not provided')}
+
+                        📍 Pickup Location: {pickup_address}
+                        ⏰ Departure Time: {start_time}
+                        🏋️‍♂️ Gym Departure Time: {end_time}
+
+                        Please arrive a few minutes before the departure time.
+
+                        Safe travels!"""
+                        
+                        send_match_email(rider['email'], subject, body)
+                        print(f"✅ Sent reminder email to rider {rider['email']}")
+                    except Exception as e:
+                        print(f"❌ Error sending reminder email to rider {rider['email']}: {e}")
+            
+            # Send driver email (existing functionality)
             send_driver_email(driver_email, driver_name, drive, paired_riders)
 
 @app.route('/api/sheets', methods=['GET'])
@@ -730,7 +764,7 @@ def add_driver():
             return jsonify({'error': 'Address not in supported region!'}), 400
 
         # Add drives and pair with riders
-        drive_success = add_drive(data)
+        drive_success, immediate_pairing = add_drive(data)
         if not drive_success:
             return jsonify({'error': 'Failed to process drives and pair riders'}), 500
 
@@ -750,8 +784,9 @@ def add_driver():
         # Store in Firestore
         driver_id = DriverModel.create(driver_data)
         
+        message = 'Driver added successfully and paired with available riders!' if immediate_pairing else 'Driver added successfully! Riders will be paired during weekly matching.'
         return jsonify({
-            'message': 'Driver added successfully and paired with available riders!',
+            'message': message,
             'driver_id': driver_id
         }), 201
         
@@ -782,6 +817,19 @@ def add_drive(data):
         # Get all available riders
         all_riders = RiderModel.get_all()
         
+        # Get current week info to determine if immediate pairing should happen
+        state = get_current_week_state()
+        current_week_dates = []
+        if state['week_start'] and state['week_end']:
+            week_start = datetime.strptime(state['week_start'], '%Y-%m-%d')
+            for i in range(7):
+                date = week_start + timedelta(days=i)
+                day_name = date.strftime('%A')
+                date_str = date.strftime('%m/%d/%y')
+                current_week_dates.append(f"{day_name}, {date_str}")
+        
+        immediate_pairing_happened = False
+        
         for drive_data in drives:
             # Each drive_data is a dictionary with date as key
             for date, time_slots in drive_data.items():
@@ -809,15 +857,23 @@ def add_drive(data):
                     # Store drive in Firestore
                     drive_id = DriveModel.create(drive_info)
                     
-                    # Pair riders based on availability and location
-                    paired_riders = pair_riders_with_drive(
-                        all_riders, 
-                        date, 
-                        start_time, 
-                        end_time, 
-                        address, 
-                        car_capacity
-                    )
+                    # Only attempt to pair riders if this drive is for the current week
+                    # (before or on the coming Sunday) - future week drives will be paired during weekly matching
+                    paired_riders = []
+                    if date in current_week_dates:
+                        # Pair riders based on availability and location
+                        paired_riders = pair_riders_with_drive(
+                            all_riders, 
+                            date, 
+                            start_time, 
+                            end_time, 
+                            address, 
+                            car_capacity
+                        )
+                        if paired_riders:
+                            immediate_pairing_happened = True
+                    else:
+                        print(f"Drive for {date} is for a future week - will be paired during weekly matching")
                     
                     # Update drive with paired riders
                     if paired_riders:
@@ -849,11 +905,11 @@ def add_drive(data):
                                     paired_riders_details.append({'name': rider.get('name', 'Unknown'), 'email': rider.get('email', 'Unknown')})
                             send_driver_email(email, name, drive_info, paired_riders_details)
         
-        return True
+        return True, immediate_pairing_happened
         
     except Exception as e:
         print(f"Error in add_drive: {e}")
-        return False
+        return False, False
     
 @app.route('/api/riders', methods=['POST'])
 @require_api_key
@@ -1291,6 +1347,109 @@ def signup_for_drive(drive_id):
         return jsonify({'error': str(e)}), 500
 
 
+@app.route('/api/drives/<drive_id>/remove-rider', methods=['POST'])
+@require_api_key
+def remove_rider_from_drive(drive_id):
+    """Remove a rider from a specific drive by email"""
+    try:
+        data = request.get_json()
+        email = data.get('email')
+        if not email:
+            return jsonify({'error': 'Missing email'}), 400
+
+        drive = DriveModel.get_by_id(drive_id)
+        if not drive:
+            return jsonify({'error': 'Drive not found'}), 404
+
+        # Find the rider by email
+        all_riders = RiderModel.get_all()
+        rider = next((r for r in all_riders if r['email'].lower() == email.lower()), None)
+        if not rider:
+            return jsonify({'error': 'Rider not found'}), 404
+
+        rider_id = rider['id']
+        paired_riders = list(drive.get('paired_riders', []))
+        
+        # Check if rider is actually paired with this drive
+        if rider_id not in paired_riders:
+            return jsonify({'error': 'Rider is not signed up for this drive'}), 400
+
+        # Remove rider from drive
+        paired_riders.remove(rider_id)
+        
+        # Increment remaining capacity
+        remaining_capacity = drive.get('remaining_capacity', 0)
+        remaining_capacity = min(drive.get('total_capacity', 0), remaining_capacity + 1)
+        
+        # Update drive status
+        total_capacity = drive.get('total_capacity', 0)
+        if remaining_capacity == total_capacity:
+            status = 'available'
+        elif remaining_capacity > 0:
+            status = 'partially_filled'
+        else:
+            status = 'filled'  # This shouldn't happen but just in case
+        
+        # Update the drive
+        DriveModel.update(drive_id, {
+            'paired_riders': paired_riders,
+            'remaining_capacity': remaining_capacity,
+            'status': status
+        })
+
+        # Update rider availability - remove the paired slot for this date
+        rider_availability = rider.get('availability', {})
+        drive_date = drive['date']
+        
+        # Find and remove the slot for this drive date
+        if drive_date in rider_availability:
+            # Remove the slot that was paired with this drive
+            updated_slots = []
+            for slot in rider_availability[drive_date]:
+                if slot.get('driver') != drive_id:
+                    updated_slots.append(slot)
+            
+            if updated_slots:
+                rider_availability[drive_date] = updated_slots
+            else:
+                # If no slots left for this date, remove the date entirely
+                del rider_availability[drive_date]
+            
+            # Update the rider
+            RiderModel.update(rider_id, {'availability': rider_availability})
+
+        # Send confirmation email to the rider
+        subject = "Carpool Signup Cancelled"
+        body = f"Hi {rider.get('name', 'Rider')},\n\nYou have been removed from the carpool for {drive['date']}.\n\nDrive Details:\nDate: {drive['date']}\nTime: {drive['start_time']} - {drive['end_time']}\nPickup Address: {drive.get('pickup_address', 'Unknown')}\nDriver: {drive.get('driver_name', 'Unknown')}\n\nIf you need a ride, please sign up for another available drive.\n\nSafe travels!"
+        try:
+            send_match_email(rider['email'], subject, body)
+        except Exception as e:
+            print(f"Error sending removal confirmation email to {rider['email']}: {e}")
+
+        # Send updated rider list to driver if it's today's drive
+        today_str = datetime.now().strftime('%A, %m/%d/%y')
+        if drive['date'] == today_str:
+            paired_riders_details = []
+            for rid in paired_riders:
+                rider_detail = RiderModel.get_by_id(rid)
+                if rider_detail:
+                    paired_riders_details.append({
+                        'name': rider_detail.get('name', 'Unknown'), 
+                        'email': rider_detail.get('email', 'Unknown')
+                    })
+            send_driver_email(drive['driver_email'], drive['driver_name'], drive, paired_riders_details)
+
+        return jsonify({
+            'message': 'Rider removed from drive successfully',
+            'remaining_capacity': remaining_capacity,
+            'status': status
+        }), 200
+        
+    except Exception as e:
+        print(f"Error in remove_rider_from_drive: {e}")
+        return jsonify({'error': str(e)}), 500
+
+
 @app.route('/api/week-state', methods=['GET'])
 @require_api_key
 def get_week_state():
@@ -1373,12 +1532,10 @@ def trigger_matching():
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
-
 @app.route('/')
 def home():
     """Home endpoint"""
     return "MCC Carpools Backend"
-
 
 if __name__ == '__main__':
     app.run()
