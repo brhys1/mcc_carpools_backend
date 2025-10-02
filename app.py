@@ -638,9 +638,13 @@ def send_match_email(to_email, subject, body):
 
 def send_driver_email(driver_email, driver_name, drive_info, riders):
     subject = f"Your carpool for {drive_info['date']}"
-    rider_lines = [f"- {r['name']} ({r['email']})" for r in riders]
+    rider_lines = []
+    for r in riders:
+        phone_info = f" - {r.get('phone', 'No phone')}" if r.get('phone') else " - No phone"
+        rider_lines.append(f"- {r['name']} ({r['email']}){phone_info}")
     rider_list = '\n'.join(rider_lines) if rider_lines else 'No riders currently signed up.'
-    body = f"Hi {driver_name},\n\nHere is your carpool for {drive_info['date']}:\n\nPickup Address: {drive_info['pickup_address']}\nTime: {drive_info['start_time']} - {drive_info['end_time']}\n\nRiders:\n{rider_list}\n\nIf this list changes, you will receive an updated email.\n\nSafe travels!"
+    notes_section = f"\n\nYour Note for Riders: {drive_info.get('driver_notes', 'No notes provided.')}" if drive_info.get('driver_notes') else ""
+    body = f"Hi {driver_name},\n\nHere is your carpool for {drive_info['date']}:\n\nPickup Address: {drive_info['pickup_address']}\nTime: {drive_info['start_time']} - {drive_info['end_time']}\n\nRiders:\n{rider_list}{notes_section}\n\nIf this list changes, you will receive an updated email.\n\nSafe travels!"
     try:
         send_match_email(driver_email, subject, body)
     except Exception as e:
@@ -677,7 +681,11 @@ def send_daily_driver_and_rider_emails():
             for rider_id in drive.get('paired_riders', []):
                 rider = RiderModel.get_by_id(rider_id)
                 if rider:
-                    paired_riders.append({'name': rider.get('name', 'Unknown'), 'email': rider.get('email', 'Unknown')})
+                    paired_riders.append({
+                        'name': rider.get('name', 'Unknown'), 
+                        'email': rider.get('email', 'Unknown'),
+                        'phone': rider.get('phone', '')
+                    })
                     
                     # Send reminder email to rider
                     try:
@@ -698,6 +706,8 @@ def send_daily_driver_and_rider_emails():
                         📍 Pickup Location: {pickup_address}
                         ⏰ Departure Time: {start_time}
                         🏋️‍♂️ Gym Departure Time: {end_time}
+
+                        💬 Driver's Note: {drive.get('driver_notes', 'No special notes from driver.')}
 
                         Please arrive a few minutes before the departure time.
 
@@ -751,6 +761,7 @@ def add_driver():
         address = data['address']
         drives = data['drives']
         phone = data['phone']
+        notes = data.get('notes', '')  # Optional notes field
         capacity = data.get('capacity', 1)  # Default capacity of 1
 
         # Validate address
@@ -778,7 +789,8 @@ def add_driver():
             "capacity": capacity,
             "lat": lat,
             "lng": lng,
-            "phone": phone
+            "phone": phone,
+            "notes": notes
         }
 
         # Store in Firestore
@@ -812,6 +824,7 @@ def add_drive(data):
         address = data['address']
         drives = data['drives']
         phone = data.get('phone', None)
+        notes = data.get('notes', '')  # Optional notes field
         capacity = data.get('capacity', 1)  # Default capacity of 1
 
         # Get all available riders
@@ -843,6 +856,7 @@ def add_drive(data):
                         "driver_name": name,
                         "driver_email": email,
                         "driver_phone": phone,
+                        "driver_notes": notes,
                         "pickup_address": address,
                         "date": date,
                         "start_time": start_time,
@@ -891,7 +905,7 @@ def add_drive(data):
                             rider = RiderModel.get_by_id(rider_id)
                             if rider and rider.get('email'):
                                 subject = "You've been matched for a carpool!"
-                                body = f"Hi {rider.get('name', 'Rider')},\n\nYou've been matched with driver {name} for your ride on {date}.\nPickup: {address}\nDeparture Time: {start_time}\nGym Departure Time: {end_time}\nPlease arrive a few minutes before the departure time.\n\nContact your driver at: {email} or {phone}\n"
+                                body = f"Hi {rider.get('name', 'Rider')},\n\nYou've been matched with driver {name} for your ride on {date}.\nPickup: {address}\nDeparture Time: {start_time}\nGym Departure Time: {end_time}\nPlease arrive a few minutes before the departure time.\n\nContact your driver at: {email} or {phone}\n\nDriver's Note: {notes if notes else 'No special notes from driver.'}\n"
                                 try:
                                     send_match_email(rider['email'], subject, body)
                                 except Exception as e:
@@ -902,7 +916,11 @@ def add_drive(data):
                             for rider_id in paired_riders:
                                 rider = RiderModel.get_by_id(rider_id)
                                 if rider:
-                                    paired_riders_details.append({'name': rider.get('name', 'Unknown'), 'email': rider.get('email', 'Unknown')})
+                                    paired_riders_details.append({
+                                        'name': rider.get('name', 'Unknown'), 
+                                        'email': rider.get('email', 'Unknown'),
+                                        'phone': rider.get('phone', '')
+                                    })
                             send_driver_email(email, name, drive_info, paired_riders_details)
         
         return True, immediate_pairing_happened
@@ -931,6 +949,7 @@ def add_rider():
 
         name = data['name']
         email = data['email']
+        phone = data.get('phone', '')  # Optional phone field
         availability = data['availability']
         divisions = data['divisions']
 
@@ -941,6 +960,7 @@ def add_rider():
             # Update existing rider
             RiderModel.update(existing_rider.id, {
                 "email": email,
+                "phone": phone,
                 "availability": availability,
                 "divisions": divisions
             })
@@ -951,6 +971,7 @@ def add_rider():
             rider_data = {
                 "name": name,
                 "email": email,
+                "phone": phone,
                 "availability": availability,
                 "divisions": divisions
             }
@@ -1161,7 +1182,8 @@ def get_current_week_drives():
                     if rider:
                         paired_riders_details.append({
                             'name': rider.get('name', 'Unknown'),
-                            'email': rider.get('email', 'Unknown')
+                            'email': rider.get('email', 'Unknown'),
+                            'phone': rider.get('phone', '')
                         })
                 
                 drive_info = {
@@ -1330,13 +1352,17 @@ def signup_for_drive(drive_id):
                 for rid in paired_riders:
                     rider = RiderModel.get_by_id(rid)
                     if rider:
-                        paired_riders_details.append({'name': rider.get('name', 'Unknown'), 'email': rider.get('email', 'Unknown')})
+                        paired_riders_details.append({
+    'name': rider.get('name', 'Unknown'), 
+    'email': rider.get('email', 'Unknown'),
+    'phone': rider.get('phone', '')
+})
                 send_driver_email(drive['driver_email'], drive['driver_name'], drive, paired_riders_details)
             # Send confirmation email to the rider who just signed up
             rider = RiderModel.get_by_id(rider_id)
             if rider and rider.get('email'):
                 subject = "Carpool Signup Confirmation"
-                body = f"Hi {rider.get('name', 'Rider')},\n\nYou have successfully signed up for a carpool!\n\nDrive Details:\nDate: {drive_date}\nTime: {start_time} - {end_time}\nPickup Address: {drive.get('pickup_address', 'Unknown')}\n\nDriver: {drive.get('driver_name', 'Unknown')}\nDriver Email: {drive.get('driver_email', 'Unknown')}\n\nSee you there!"
+                body = f"Hi {rider.get('name', 'Rider')},\n\nYou have successfully signed up for a carpool!\n\nDrive Details:\nDate: {drive_date}\nTime: {start_time} - {end_time}\nPickup Address: {drive.get('pickup_address', 'Unknown')}\n\nDriver: {drive.get('driver_name', 'Unknown')}\nDriver Email: {drive.get('driver_email', 'Unknown')}\nDriver Phone: {drive.get('driver_phone', 'Not provided')}\n\nDriver's Note: {drive.get('driver_notes', 'No special notes from driver.')}\n\nSee you there!"
                 try:
                     send_match_email(rider['email'], subject, body)
                 except Exception as e:
@@ -1435,7 +1461,8 @@ def remove_rider_from_drive(drive_id):
                 if rider_detail:
                     paired_riders_details.append({
                         'name': rider_detail.get('name', 'Unknown'), 
-                        'email': rider_detail.get('email', 'Unknown')
+                        'email': rider_detail.get('email', 'Unknown'),
+                        'phone': rider_detail.get('phone', '')
                     })
             send_driver_email(drive['driver_email'], drive['driver_name'], drive, paired_riders_details)
 
@@ -1513,7 +1540,7 @@ def trigger_matching():
                         rider = RiderModel.get_by_id(rider_id)
                         if rider and rider.get('email'):
                             subject = "You've been matched for a carpool!"
-                            body = f"Hi {rider.get('name', 'Rider')},\n\nYou've been matched with driver {drive.get('driver_name')} for your ride on {drive_date}.\nPickup: {drive.get('pickup_address')}\nTime: {drive.get('start_time')} - {drive.get('end_time')}\n\nContact your driver at: {drive.get('driver_email')}\n"
+                            body = f"Hi {rider.get('name', 'Rider')},\n\nYou've been matched with driver {drive.get('driver_name')} for your ride on {drive_date}.\nPickup: {drive.get('pickup_address')}\nTime: {drive.get('start_time')} - {drive.get('end_time')}\n\nContact your driver at: {drive.get('driver_email')} or {drive.get('driver_phone', 'No phone provided')}\n\nDriver's Note: {drive.get('driver_notes', 'No special notes from driver.')}\n"
                             try:
                                 send_match_email(rider['email'], subject, body)
                             except Exception as e:
@@ -1524,7 +1551,11 @@ def trigger_matching():
                     for rider_id in paired_riders:
                         rider = RiderModel.get_by_id(rider_id)
                         if rider:
-                            paired_riders_details.append({'name': rider.get('name', 'Unknown'), 'email': rider.get('email', 'Unknown')})
+                            paired_riders_details.append({
+    'name': rider.get('name', 'Unknown'), 
+    'email': rider.get('email', 'Unknown'),
+    'phone': rider.get('phone', '')
+})
                     send_driver_email(drive.get('driver_email'), drive.get('driver_name'), drive, paired_riders_details)
         
         return jsonify({'message': 'Matching algorithm completed successfully'}), 200
